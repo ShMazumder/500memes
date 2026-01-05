@@ -56,16 +56,66 @@ class _MemeGridScreenState extends State<MemeGridScreen> {
 
   Future<void> _loadMemes() async {
     try {
-      final manifestContent = await DefaultAssetBundle.of(context).loadString('AssetManifest.json');
-      final Map<String, dynamic> manifestMap = json.decode(manifestContent);
-      
-      final memePaths = manifestMap.keys
-          .where((String key) => key.startsWith('assets/memes/') && 
-                (key.endsWith('.png') || key.endsWith('.jpg') || key.endsWith('.jpeg')))
-          .toList();
-      
-      // Sort to keep order if named sequentially, but not strictly required
-      memePaths.sort();
+      // Prefer using the curated metadata file if present
+      final metaContent = await rootBundle.loadString('memes.json');
+      final Map<String, dynamic> metaMap = json.decode(metaContent);
+      final List<dynamic> metaList = metaMap['memes'] ?? [];
+
+      final List<String> collected = [];
+      for (final item in metaList) {
+        if (item is Map<String, dynamic>) {
+          // prefer an already-optimized local path, then thumb, then construct from url
+          String? local = item['local'] as String?;
+          String? thumb = item['thumb'] as String?;
+          String? url = item['url'] as String?;
+
+          if (local != null && local.isNotEmpty) {
+            collected.add(local);
+          } else if (thumb != null && thumb.isNotEmpty) {
+            collected.add(thumb);
+          } else if (url != null && url.isNotEmpty) {
+            final basename = url.split('?')[0].split('/').last;
+            collected.add('assets/memes/' + basename);
+          }
+        }
+      }
+
+      // filter to assets that are likely to exist and dedupe
+      final seen = <String>{};
+      final memePaths = <String>[];
+      for (var p in collected) {
+        if (!p.startsWith('assets/')) {
+          p = p.replaceAll('\\', '/');
+        }
+        if (seen.add(p)) memePaths.add(p);
+      }
+
+      if (memePaths.isEmpty) {
+        // fallback to scanning AssetManifest if metadata is missing or empty
+        final manifestContent = await rootBundle.loadString(
+          'AssetManifest.json',
+        );
+        final Map<String, dynamic> manifestMap = json.decode(manifestContent);
+        final paths =
+            manifestMap.keys
+                .where(
+                  (String key) =>
+                      key.startsWith('assets/memes/') &&
+                      (key.endsWith('.png') ||
+                          key.endsWith('.jpg') ||
+                          key.endsWith('.jpeg') ||
+                          key.endsWith('.webp')),
+                )
+                .toList()
+              ..sort();
+        if (mounted) {
+          setState(() {
+            memes = paths;
+            isLoading = false;
+          });
+        }
+        return;
+      }
 
       if (mounted) {
         setState(() {
@@ -74,56 +124,190 @@ class _MemeGridScreenState extends State<MemeGridScreen> {
         });
       }
     } catch (e) {
-      debugPrint('Error loading meme assets: $e');
-      if (mounted) {
-        setState(() {
-          isLoading = false;
-        });
+      debugPrint('Error loading meme metadata: $e');
+      // fallback: try the AssetManifest approach
+      try {
+        final manifestContent = await rootBundle.loadString(
+          'AssetManifest.json',
+        );
+        final Map<String, dynamic> manifestMap = json.decode(manifestContent);
+
+        final memePaths =
+            manifestMap.keys
+                .where(
+                  (String key) =>
+                      key.startsWith('assets/memes/') &&
+                      (key.endsWith('.png') ||
+                          key.endsWith('.jpg') ||
+                          key.endsWith('.jpeg') ||
+                          key.endsWith('.webp')),
+                )
+                .toList()
+              ..sort();
+
+        if (mounted) {
+          setState(() {
+            memes = memePaths;
+            isLoading = false;
+          });
+        }
+      } catch (e2) {
+        debugPrint('Fallback AssetManifest error: $e2');
+        if (mounted) {
+          setState(() {
+            isLoading = false;
+          });
+        }
       }
+    }
+  }
+
+  Future<void> _refresh() async {
+    await _loadMemes();
+  }
+
+  void _shuffle() {
+    setState(() {
+      memes.shuffle();
+    });
+  }
+
+  void _openSearch() async {
+    final result = await showSearch<String?>(
+      context: context,
+      delegate: MemeSearch(memes),
+    );
+
+    if (!mounted) return;
+    if (result != null) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => MemeDetailScreen(assetPath: result)),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final width = MediaQuery.of(context).size.width;
+    final crossAxisCount = (width ~/ 180).clamp(2, 6);
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('500 Memes'),
+        title: Text(isLoading ? '500 Memes' : '500 Memes (${memes.length})'),
+        actions: [
+          IconButton(onPressed: _openSearch, icon: const Icon(Icons.search)),
+          IconButton(onPressed: _shuffle, icon: const Icon(Icons.shuffle)),
+        ],
       ),
-      body: isLoading 
+      body: isLoading
           ? const Center(child: CircularProgressIndicator())
-          : GridView.builder(
-        padding: const EdgeInsets.all(8.0),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 2,
-          childAspectRatio: 1.0,
-          crossAxisSpacing: 8.0,
-          mainAxisSpacing: 8.0,
-        ),
-        itemCount: memes.length,
-        itemBuilder: (context, index) {
-          final memePath = memes[index];
-          return GestureDetector(
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => MemeDetailScreen(assetPath: memePath),
+          : RefreshIndicator(
+              onRefresh: _refresh,
+              child: GridView.builder(
+                padding: const EdgeInsets.all(12.0),
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: crossAxisCount,
+                  childAspectRatio: 1.0,
+                  crossAxisSpacing: 12.0,
+                  mainAxisSpacing: 12.0,
                 ),
-              );
-            },
-            child: Hero(
-              tag: memePath,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Image.asset(
-                  memePath,
-                  fit: BoxFit.cover,
-                ),
+                itemCount: memes.length,
+                itemBuilder: (context, index) {
+                  final memePath = memes[index];
+                  return GestureDetector(
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) =>
+                              MemeDetailScreen(assetPath: memePath),
+                        ),
+                      );
+                    },
+                    child: Hero(
+                      tag: memePath,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: Image.asset(
+                          memePath,
+                          fit: BoxFit.cover,
+                          errorBuilder: (c, e, s) => Container(
+                            color: Colors.grey[300],
+                            child: const Center(
+                              child: Icon(Icons.broken_image),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
               ),
             ),
-          );
-        },
-      ),
+    );
+  }
+}
+
+class MemeSearch extends SearchDelegate<String?> {
+  final List<String> memes;
+
+  MemeSearch(this.memes);
+
+  @override
+  List<Widget>? buildActions(BuildContext context) {
+    return [
+      if (query.isNotEmpty)
+        IconButton(onPressed: () => query = '', icon: const Icon(Icons.clear)),
+    ];
+  }
+
+  @override
+  Widget? buildLeading(BuildContext context) {
+    return IconButton(
+      onPressed: () => close(context, null),
+      icon: const Icon(Icons.arrow_back),
+    );
+  }
+
+  @override
+  Widget buildResults(BuildContext context) {
+    final results = memes.where((m) => m.contains(query)).toList();
+    return ListView.builder(
+      itemCount: results.length,
+      itemBuilder: (context, index) {
+        final path = results[index];
+        return ListTile(
+          leading: SizedBox(
+            width: 56,
+            child: Image.asset(path, fit: BoxFit.cover),
+          ),
+          title: Text(path.split('/').last),
+          onTap: () => close(context, path),
+        );
+      },
+    );
+  }
+
+  @override
+  Widget buildSuggestions(BuildContext context) {
+    final suggestions = query.isEmpty
+        ? memes.take(20).toList()
+        : memes.where((m) => m.contains(query)).toList();
+
+    return ListView.builder(
+      itemCount: suggestions.length,
+      itemBuilder: (context, index) {
+        final path = suggestions[index];
+        return ListTile(
+          leading: SizedBox(
+            width: 56,
+            child: Image.asset(path, fit: BoxFit.cover),
+          ),
+          title: Text(path.split('/').last),
+          onTap: () => close(context, path),
+        );
+      },
     );
   }
 }
@@ -134,27 +318,30 @@ class MemeDetailScreen extends StatelessWidget {
   const MemeDetailScreen({super.key, required this.assetPath});
 
   Future<void> _shareMeme(BuildContext context) async {
+    final scaffoldMessenger = ScaffoldMessenger.of(context);
+    final box = context.findRenderObject() as RenderBox?;
+
     try {
-      final box = context.findRenderObject() as RenderBox?;
-      
-      // Load asset
       final byteData = await rootBundle.load(assetPath);
       final list = byteData.buffer.asUint8List();
 
       final tempDir = await getTemporaryDirectory();
       final fileName = assetPath.split('/').last;
       final file = File('${tempDir.path}/$fileName');
-      
+
       await file.writeAsBytes(list);
+
+      final origin = box != null
+          ? box.localToGlobal(Offset.zero) & box.size
+          : Rect.zero;
 
       await Share.shareXFiles(
         [XFile(file.path)],
         text: 'Found this funny meme on 500 Memes app! 😂',
-        sharePositionOrigin: box!.localToGlobal(Offset.zero) & box.size,
+        sharePositionOrigin: origin,
       );
     } catch (e) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      scaffoldMessenger.showSnackBar(
         SnackBar(content: Text('Error sharing meme: $e')),
       );
     }
@@ -172,10 +359,7 @@ class MemeDetailScreen extends StatelessWidget {
       body: Center(
         child: Hero(
           tag: assetPath,
-          child: Image.asset(
-            assetPath,
-            fit: BoxFit.contain,
-          ),
+          child: Image.asset(assetPath, fit: BoxFit.contain),
         ),
       ),
       floatingActionButton: FloatingActionButton.extended(
