@@ -45,7 +45,8 @@ class MemeGridScreen extends StatefulWidget {
 }
 
 class _MemeGridScreenState extends State<MemeGridScreen> {
-  List<String> memes = [];
+  // Each entry: {'full': <full asset path>, 'thumb': <thumbnail path or null>, 'title': <title>}
+  List<Map<String, String?>> memes = [];
   bool isLoading = true;
 
   @override
@@ -61,41 +62,57 @@ class _MemeGridScreenState extends State<MemeGridScreen> {
       final Map<String, dynamic> metaMap = json.decode(metaContent);
       final List<dynamic> metaList = metaMap['memes'] ?? [];
 
-      final List<String> collected = [];
+      final entries = <Map<String, String?>>[];
       for (final item in metaList) {
         if (item is Map<String, dynamic>) {
-          // prefer an already-optimized local path, then thumb, then construct from url
-          String? local = item['local'] as String?;
-          String? thumb = item['thumb'] as String?;
-          String? url = item['url'] as String?;
+          final local = (item['local'] as String?)?.replaceAll('\\', '/');
+          final thumb = (item['thumb'] as String?)?.replaceAll('\\', '/');
+          final url = item['url'] as String?;
+          final title = item['title'] as String? ?? '';
 
+          String? fullPath;
           if (local != null && local.isNotEmpty) {
-            collected.add(local);
-          } else if (thumb != null && thumb.isNotEmpty) {
-            collected.add(thumb);
+            fullPath = local;
           } else if (url != null && url.isNotEmpty) {
             final basename = url.split('?')[0].split('/').last;
-            collected.add('assets/memes/' + basename);
+            fullPath = 'assets/memes/$basename';
+          }
+
+          if (fullPath != null) {
+            entries.add({'full': fullPath, 'thumb': thumb, 'title': title});
           }
         }
       }
 
-      // filter to assets that are likely to exist and dedupe
+      // dedupe while preserving order
       final seen = <String>{};
-      final memePaths = <String>[];
-      for (var p in collected) {
-        if (!p.startsWith('assets/')) {
-          p = p.replaceAll('\\', '/');
-        }
-        if (seen.add(p)) memePaths.add(p);
+      final memePaths = <Map<String, String?>>[];
+      for (var e in entries) {
+        final key = e['full'] ?? e['thumb'] ?? e['title'] ?? '';
+        if (key.isNotEmpty && seen.add(key)) memePaths.add(e);
       }
 
-      if (memePaths.isEmpty) {
-        // fallback to scanning AssetManifest if metadata is missing or empty
-        final manifestContent = await rootBundle.loadString(
-          'AssetManifest.json',
-        );
-        final Map<String, dynamic> manifestMap = json.decode(manifestContent);
+      // Load AssetManifest once so we can validate which metadata paths
+      // actually exist in the bundled assets. This avoids attempting to load
+      // assets that were never added to `flutter` (causing 404s on web).
+      final manifestContent = await rootBundle.loadString('AssetManifest.json');
+      final Map<String, dynamic> manifestMap = json.decode(manifestContent);
+      final manifestKeys = manifestMap.keys.toSet();
+
+      // Keep only entries whose `full` or `thumb` exists in the manifest.
+      final validated = <Map<String, String?>>[];
+      for (var e in memePaths) {
+        final full = e['full'];
+        final thumb = e['thumb'];
+        if ((full != null && manifestKeys.contains(full)) ||
+            (thumb != null && manifestKeys.contains(thumb))) {
+          validated.add(e);
+        }
+      }
+
+      if (validated.isEmpty) {
+        // If none of the metadata entries map to actual bundled files,
+        // fall back to using whatever is present in the AssetManifest.
         final paths =
             manifestMap.keys
                 .where(
@@ -104,13 +121,22 @@ class _MemeGridScreenState extends State<MemeGridScreen> {
                       (key.endsWith('.png') ||
                           key.endsWith('.jpg') ||
                           key.endsWith('.jpeg') ||
-                          key.endsWith('.webp')),
+                          key.endsWith('.webp') ||
+                          key.endsWith('.gif')),
                 )
                 .toList()
               ..sort();
+
+        debugPrint(
+          'Loaded ${paths.length} memes from AssetManifest; sample: ${paths.take(5).toList()}',
+        );
         if (mounted) {
           setState(() {
-            memes = paths;
+            memes = paths
+                .map(
+                  (p) => {'full': p, 'thumb': null, 'title': p.split('/').last},
+                )
+                .toList();
             isLoading = false;
           });
         }
@@ -119,9 +145,12 @@ class _MemeGridScreenState extends State<MemeGridScreen> {
 
       if (mounted) {
         setState(() {
-          memes = memePaths;
+          memes = validated.isNotEmpty ? validated : memePaths;
           isLoading = false;
         });
+        debugPrint(
+          'Loaded ${memePaths.length} memes from metadata; sample: ${memePaths.take(5).toList()}',
+        );
       }
     } catch (e) {
       debugPrint('Error loading meme metadata: $e');
@@ -147,14 +176,60 @@ class _MemeGridScreenState extends State<MemeGridScreen> {
 
         if (mounted) {
           setState(() {
-            memes = memePaths;
+            memes = memePaths
+                .map(
+                  (p) => {'full': p, 'thumb': null, 'title': p.split('/').last},
+                )
+                .toList();
             isLoading = false;
           });
         }
       } catch (e2) {
         debugPrint('Fallback AssetManifest error: $e2');
+        // As a last resort (e.g. running on web where AssetManifest isn't
+        // available), probe for numbered placeholder assets that exist in
+        // the repo (meme_001.png, meme_002.png, ...). Use rootBundle.load
+        // to check existence and avoid trying to render non-bundled files.
+        final probed = <String>[];
+        try {
+          for (var i = 1; i <= 500; i++) {
+            final padded = i.toString().padLeft(3, '0');
+            final candidate = 'assets/memes/meme_$padded.png';
+            try {
+              await rootBundle.load(candidate);
+              probed.add(candidate);
+            } catch (_) {
+              // ignore missing candidate
+            }
+          }
+
+          // also probe non-padded names (some older files)
+          if (probed.isEmpty) {
+            for (var i = 1; i <= 200; i++) {
+              final candidate = 'assets/memes/meme_$i.png';
+              try {
+                await rootBundle.load(candidate);
+                probed.add(candidate);
+              } catch (_) {}
+            }
+          }
+        } catch (probeErr) {
+          debugPrint('Probing assets failed: $probeErr');
+        }
+
         if (mounted) {
           setState(() {
+            if (probed.isNotEmpty) {
+              memes = probed
+                  .map(
+                    (p) => {
+                      'full': p,
+                      'thumb': null,
+                      'title': p.split('/').last,
+                    },
+                  )
+                  .toList();
+            }
             isLoading = false;
           });
         }
@@ -214,23 +289,26 @@ class _MemeGridScreenState extends State<MemeGridScreen> {
                 ),
                 itemCount: memes.length,
                 itemBuilder: (context, index) {
-                  final memePath = memes[index];
+                  final entry = memes[index];
+                  final fullPath = entry['full'] ?? '';
+                  final thumbPath = entry['thumb'] ?? fullPath;
+
                   return GestureDetector(
                     onTap: () {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
                           builder: (context) =>
-                              MemeDetailScreen(assetPath: memePath),
+                              MemeDetailScreen(assetPath: fullPath),
                         ),
                       );
                     },
                     child: Hero(
-                      tag: memePath,
+                      tag: fullPath,
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(12),
                         child: Image.asset(
-                          memePath,
+                          thumbPath,
                           fit: BoxFit.cover,
                           errorBuilder: (c, e, s) => Container(
                             color: Colors.grey[300],
@@ -250,7 +328,7 @@ class _MemeGridScreenState extends State<MemeGridScreen> {
 }
 
 class MemeSearch extends SearchDelegate<String?> {
-  final List<String> memes;
+  final List<Map<String, String?>> memes;
 
   MemeSearch(this.memes);
 
@@ -272,18 +350,31 @@ class MemeSearch extends SearchDelegate<String?> {
 
   @override
   Widget buildResults(BuildContext context) {
-    final results = memes.where((m) => m.contains(query)).toList();
+    final results = memes
+        .where(
+          (m) => (m['title'] ?? m['full'] ?? '').toLowerCase().contains(
+            query.toLowerCase(),
+          ),
+        )
+        .toList();
+
     return ListView.builder(
       itemCount: results.length,
       itemBuilder: (context, index) {
-        final path = results[index];
+        final entry = results[index];
+        final full = entry['full'] ?? '';
+        final thumb = entry['thumb'] ?? full;
+        final title = entry['title']?.isNotEmpty == true
+            ? entry['title']!
+            : full.split('/').last;
+
         return ListTile(
           leading: SizedBox(
             width: 56,
-            child: Image.asset(path, fit: BoxFit.cover),
+            child: Image.asset(thumb, fit: BoxFit.cover),
           ),
-          title: Text(path.split('/').last),
-          onTap: () => close(context, path),
+          title: Text(title),
+          onTap: () => close(context, full),
         );
       },
     );
@@ -291,21 +382,33 @@ class MemeSearch extends SearchDelegate<String?> {
 
   @override
   Widget buildSuggestions(BuildContext context) {
-    final suggestions = query.isEmpty
+    final suggestionEntries = query.isEmpty
         ? memes.take(20).toList()
-        : memes.where((m) => m.contains(query)).toList();
+        : memes
+              .where(
+                (m) => (m['title'] ?? m['full'] ?? '').toLowerCase().contains(
+                  query.toLowerCase(),
+                ),
+              )
+              .toList();
 
     return ListView.builder(
-      itemCount: suggestions.length,
+      itemCount: suggestionEntries.length,
       itemBuilder: (context, index) {
-        final path = suggestions[index];
+        final entry = suggestionEntries[index];
+        final full = entry['full'] ?? '';
+        final thumb = entry['thumb'] ?? full;
+        final title = entry['title']?.isNotEmpty == true
+            ? entry['title']!
+            : full.split('/').last;
+
         return ListTile(
           leading: SizedBox(
             width: 56,
-            child: Image.asset(path, fit: BoxFit.cover),
+            child: Image.asset(thumb, fit: BoxFit.cover),
           ),
-          title: Text(path.split('/').last),
-          onTap: () => close(context, path),
+          title: Text(title),
+          onTap: () => close(context, full),
         );
       },
     );
