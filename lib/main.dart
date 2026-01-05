@@ -188,28 +188,32 @@ class _MemeGridScreenState extends State<MemeGridScreen> {
         debugPrint('Fallback AssetManifest error: $e2');
         // As a last resort (e.g. running on web where AssetManifest isn't
         // available), probe for numbered placeholder assets that exist in
-        // the repo (meme_001.png, meme_002.png, ...). Use rootBundle.load
-        // to check existence and avoid trying to render non-bundled files.
+        // the repo (meme_001.png, meme_002.png, ...).
+        // Limit probing to avoid massive 404 spam in the browser console.
         final probed = <String>[];
         try {
-          for (var i = 1; i <= 500; i++) {
+          const maxProbe = 100; // keep this small to avoid noise
+          const stopAfterFound = 60; // stop once we found a reasonable set
+          for (var i = 1; i <= maxProbe; i++) {
             final padded = i.toString().padLeft(3, '0');
             final candidate = 'assets/memes/meme_$padded.png';
             try {
               await rootBundle.load(candidate);
               probed.add(candidate);
+              if (probed.length >= stopAfterFound) break;
             } catch (_) {
               // ignore missing candidate
             }
           }
 
-          // also probe non-padded names (some older files)
+          // also probe a few non-padded names if nothing found yet
           if (probed.isEmpty) {
-            for (var i = 1; i <= 200; i++) {
+            for (var i = 1; i <= 50; i++) {
               final candidate = 'assets/memes/meme_$i.png';
               try {
                 await rootBundle.load(candidate);
                 probed.add(candidate);
+                if (probed.length >= stopAfterFound) break;
               } catch (_) {}
             }
           }
