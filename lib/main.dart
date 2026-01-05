@@ -196,7 +196,7 @@ class _MemeGridScreenState extends State<MemeGridScreen> {
           const stopAfterFound = 60; // stop once we found a reasonable set
           for (var i = 1; i <= maxProbe; i++) {
             final padded = i.toString().padLeft(3, '0');
-            final candidate = 'assets/memes/meme_$padded.png';
+            final candidate = 'assets/memes/meme_$padded.webp';
             try {
               await rootBundle.load(candidate);
               probed.add(candidate);
@@ -209,7 +209,7 @@ class _MemeGridScreenState extends State<MemeGridScreen> {
           // also probe a few non-padded names if nothing found yet
           if (probed.isEmpty) {
             for (var i = 1; i <= 50; i++) {
-              final candidate = 'assets/memes/meme_$i.png';
+              final candidate = 'assets/memes/meme_$i.webp';
               try {
                 await rootBundle.load(candidate);
                 probed.add(candidate);
